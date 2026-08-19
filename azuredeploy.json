@@ -1,0 +1,181 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "metadata": {
+        "title": "Automated Azure Budget Guardrail System",
+        "description": "Deploys an automated cost guardrail workflow (BudgetSystem) that listens for Azure Budget alerts, queries the Cost Management API to identify the highest spending resource, and sends an email notification with a direct portal link to the resource."
+    },
+    "parameters": {
+        "logicAppName": {
+            "defaultValue": "BudgetSystem",
+            "type": "String",
+            "metadata": {
+                "description": "The name of the Logic App workflow resource."
+            }
+        },
+        "recipientEmail": {
+            "type": "String",
+            "metadata": {
+                "description": "The email address where cost alert notifications and resource links will be delivered."
+            }
+        },
+        "location": {
+            "type": "String",
+            "defaultValue": "eastus",
+            "metadata": {
+                "description": "The Azure region where resources should be deployed. Select a region permitted by your subscription policies."
+            }
+        }
+    },
+    "variables": {
+        "outlookConnectionName": "outlook-costalerts"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[variables('outlookConnectionName')]",
+            "location": "[parameters('location')]",
+            "properties": {
+                "displayName": "[parameters('recipientEmail')]",
+                "api": {
+                    "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', parameters('location'), '/managedApis/outlook')]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('logicAppName')]",
+            "location": "[parameters('location')]",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/connections', variables('outlookConnectionName'))]"
+            ],
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        }
+                    },
+                    "triggers": {
+                        "When_an_HTTP_request_is_received": {
+                            "type": "Request",
+                            "kind": "Http"
+                        }
+                    },
+                    "actions": {
+                        "HTTP": {
+                            "runAfter": {},
+                            "type": "Http",
+                            "inputs": {
+                                "uri": "https://management.azure.com/subscriptions/@{triggerBody()?['data']?['SubscriptionId']}/providers/Microsoft.CostManagement/query?api-version=2023-03-01",
+                                "method": "POST",
+                                "headers": {
+                                    "Content-Type": "application/json"
+                                },
+                                "body": {
+                                    "type": "ActualCost",
+                                    "timeframe": "MonthToDate",
+                                    "dataset": {
+                                        "granularity": "None",
+                                        "aggregation": {
+                                            "totalCost": {
+                                                "name": "PreTaxCost",
+                                                "function": "Sum"
+                                            }
+                                        },
+                                        "grouping": [
+                                            {
+                                                "type": "Dimension",
+                                                "name": "ResourceId"
+                                            }
+                                        ],
+                                        "sorting": [
+                                            {
+                                                "direction": "descending",
+                                                "name": "PreTaxCost"
+                                            }
+                                        ]
+                                    }
+                                },
+                                "authentication": {
+                                    "type": "ManagedServiceIdentity",
+                                    "audience": "https://management.azure.com"
+                                }
+                            },
+                            "runtimeConfiguration": {
+                                "contentTransfer": {
+                                    "transferMode": "Chunked"
+                                }
+                            }
+                        },
+                        "Compose": {
+                            "runAfter": {
+                                "HTTP": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Compose",
+                            "inputs": "@body('HTTP')?['properties']?['rows']?[0]?[1]",
+                            "description": "Used to take first row."
+                        },
+                        "Compose_1": {
+                            "runAfter": {
+                                "Compose": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Compose",
+                            "inputs": "@concat('https://portal.azure.com/#@/resource/', outputs('Compose'))"
+                        },
+                        "Send_an_email_(V2)": {
+                            "runAfter": {
+                                "Compose_1": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['outlook']['connectionId']"
+                                    }
+                                },
+                                "method": "post",
+                                "body": {
+                                    "To": "[parameters('recipientEmail')]",
+                                    "Subject": "🚨 High Cost Alert: Budget Limit Exceeded!",
+                                    "Body": "<p class=\"editor-paragraph\">Budget Threshold Exceeded!<br>Your automated cost guardrail detected spending above your configured budget.<br><br>Highest Cost Resource:<br>Resource ID: @{outputs('Compose')}<br><br>Portal Link: @{outputs('Compose_1')}</p><br>",
+                                    "Importance": "Normal"
+                                },
+                                "path": "/v2/Mail"
+                            }
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "type": "Object",
+                        "value": {
+                            "outlook": {
+                                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', parameters('location'), '/managedApis/outlook')]",
+                                "connectionId": "[resourceId('Microsoft.Web/connections', variables('outlookConnectionName'))]",
+                                "connectionName": "outlook",
+                                "connectionProperties": {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ]
+}
