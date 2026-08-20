@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-
-# budget.sh - Check for Azure CLI, ensure login, and list resource groups
-
+# budget.sh - Check for Azure CLI, ensure login, and create subscription-level budget via REST API
 # Exit codes:
 # 0 - success
 # 1 - az not installed or login failed
@@ -31,133 +29,53 @@ else
   fi
 fi
 
-# List resource groups for the currently selected subscription
+# Ensure we have active subscription info
 echo
-echo "Resource groups in the current subscription:"
-
-# Load resource group names into an array
-mapfile -t RG_NAMES < <(az group list --query "[].name" -o tsv)
-
-if [ ${#RG_NAMES[@]} -eq 0 ]; then
-  echo "No resource groups found in the current subscription."
-  exit 0
-fi
-
-# Print numbered list
-for i in "${!RG_NAMES[@]}"; do
-  idx=$((i+1))
-  printf "%3d) %s\n" "$idx" "${RG_NAMES[$i]}"
-done
-
-# Parse selection like: 1,3-5 or 'all'
-parse_selection() {
-  local input="$1"
-  local -n out_arr=$2
-  out_arr=()
-
-  if [[ "$input" =~ ^[Aa][Ll][Ll]$ ]]; then
-    for i in "${!RG_NAMES[@]}"; do
-      out_arr+=( $((i+1)) )
-    done
-    return 0
-  fi
-
-  IFS=',' read -ra parts <<< "$input"
-  declare -A seen=()
-  for part in "${parts[@]}"; do
-    part=$(echo "$part" | xargs) # trim whitespace
-    if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-      start=${BASH_REMATCH[1]}
-      end=${BASH_REMATCH[2]}
-      if (( start> end )); then
-        echo "Invalid range: $part"
-        return 1
-      fi
-      for ((n=start;n<=end;n++)); do
-        if (( n<1 || n> ${#RG_NAMES[@]} )); then
-          echo "Selection out of range: $n"
-          return 1
-        fi
-        seen[$n]=1
-      done
-    elif [[ "$part" =~ ^[0-9]+$ ]]; then
-      n=$part
-      if (( n<1 || n> ${#RG_NAMES[@]} )); then
-        echo "Selection out of range: $n"
-        return 1
-      fi
-      seen[$n]=1
-    else
-      echo "Invalid token in selection: $part"
-      return 1
-    fi
-  done
-
-  for k in "${!seen[@]}"; do out_arr+=("$k"); done
-  # sort numeric
-  IFS=$'\n' out_arr=( $(printf "%s\n" "${out_arr[@]}" | sort -n) )
-  return 0
-}
-
-# Prompt user to select resource groups
-while true; do
-  read -p "Select resource groups by number (e.g. 1,3-5) or 'all': " selection_input
-  if parse_selection "$selection_input" SELECTED; then
-    break
-  else
-    echo "Please enter a valid selection."
-  fi
-done
-
-# Prompt budgets for each selected group
-declare -A BUDGETS
-for sel in "${SELECTED[@]}"; do
-  rg_name="${RG_NAMES[$((sel-1))]}"
-  while true; do
-    read -p "Enter budget in USD for '$rg_name' (numeric, without currency symbol): " amt
-    # accept integers or decimals
-    if [[ "$amt" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-      BUDGETS["$rg_name"]="$amt"
-      break
-    else
-      echo "Invalid amount. Enter a positive number like 100 or 123.45"
-    fi
-  done
-done
-
-# Print summary
-echo
-printf "%-40s %12s\n" "RESOURCE GROUP" "BUDGET (USD)"
-printf "%-40s %12s\n" "--------------" "------------"
-for rg in "${!BUDGETS[@]}"; do
-  printf "%-40s %12s\n" "$rg" "${BUDGETS[$rg]}"
-done
-
-# Strict mode for safer pipeline behavior
-set -euo pipefail
-
-# Create Azure budgets for the selected resource groups
-
-# Ensure we have subscription id
+echo "Fetching active subscription details..."
 SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+SUBSCRIPTION_NAME="$(az account show --query name -o tsv)"
+
 if [ -z "$SUBSCRIPTION_ID" ]; then
   echo "Unable to determine subscription id. Ensure you're logged in and have a subscription selected."
   exit 1
 fi
 
+echo "Active Subscription: $SUBSCRIPTION_NAME ($SUBSCRIPTION_ID)"
+echo
+
+# Prompt for subscription budget amount
+while true; do
+  read -p "Enter budget in USD for subscription '$SUBSCRIPTION_NAME' (numeric, without currency symbol): " amt
+  # accept integers or decimals
+  if [[ "$amt" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    break
+  else
+    echo "Invalid amount. Enter a positive number like 100 or 123.45"
+  fi
+done
+
+# Print summary
+echo
+printf "%-40s %12s\n" "SUBSCRIPTION NAME" "BUDGET (USD)"
+printf "%-40s %12s\n" "-----------------" "------------"
+printf "%-40s %12s\n" "$SUBSCRIPTION_NAME" "$amt"
+
+# Strict mode for safer pipeline behavior
+set -euo pipefail
+
 # Prefer environment variables if provided; fall back to interactive prompts
-BUDGET_NAME_PATTERN=${BUDGET_NAME_PATTERN:-${BUDGET_NAME_PATTERN_ENV:-}}
+BUDGET_NAME=${BUDGET_NAME:-${BUDGET_NAME_ENV:-}}
 CATEGORY=${CATEGORY:-${CATEGORY_ENV:-}}
 START_DATE=${START_DATE:-${START_DATE_ENV:-}}
 END_DATE=${END_DATE:-${END_DATE_ENV:-}}
 
 # Interactive prompts (only if values missing)
-# Budget name pattern: may include '{rg}' which will be replaced by the resource group name. Example: budget-{rg}
-if [[ -z "$BUDGET_NAME_PATTERN" ]]; then
+# Budget name
+if [[ -z "$BUDGET_NAME" ]]; then
   while true; do
-    read -p "Enter budget name pattern (use {rg} to include resource group name) [budget-{rg}]: " BUDGET_NAME_PATTERN
-    BUDGET_NAME_PATTERN=${BUDGET_NAME_PATTERN:-budget-{rg}}
-    if [[ -n "$BUDGET_NAME_PATTERN" ]]; then break; fi
+    read -p "Enter budget name [subscription-budget]: " BUDGET_NAME
+    BUDGET_NAME=${BUDGET_NAME:-subscription-budget}
+    if [[ -n "$BUDGET_NAME" ]]; then break; fi
   done
 fi
 
@@ -181,12 +99,21 @@ valid_date() {
   return 1
 }
 
-# Start date (required)
+# Start date (required - must be the 1st of the month)
 if [[ -z "$START_DATE" ]]; then
   while true; do
-    read -p "Enter start date (YYYY-MM-DD): " START_DATE
-    if valid_date "$START_DATE"; then break; fi
-    echo "Invalid date format or value. Use YYYY-MM-DD."
+    echo "Note: Azure requires budget start dates to begin on the 1st of the month (e.g., YYYY-MM-01)."
+    read -p "Enter start date (YYYY-MM-01): " START_DATE
+    if valid_date "$START_DATE"; then
+      if [[ "$START_DATE" =~ ^[0-9]{4}-[0-9]{2}-01$ ]]; then
+        break
+      else
+        suggested_date=$(date -d "$START_DATE" +%Y-%m-01)
+        echo "Error: Start date must be the 1st of the month! Did you mean $suggested_date?"
+      fi
+    else
+      echo "Invalid date format or value. Use YYYY-MM-01."
+    fi
   done
 fi
 
@@ -209,86 +136,51 @@ if [[ -z "$END_DATE" ]]; then
   done
 fi
 
-# Normalize budget name pattern default
-BUDGET_NAME_PATTERN=${BUDGET_NAME_PATTERN:-budget-{rg}}
+# Sanitize budget name: replace non-alphanum characters with '-'
+safe_budget_name=$(echo "$BUDGET_NAME" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
 
-# Ensure Consumption extension exists (required for budget commands)
-if ! az consumption budget create --help >/dev/null 2>&1; then
-  echo "Azure 'consumption' extension not found. Attempting to install..."
-  if az extension add --name consumption >/dev/null 2>&1; then
-    echo "Installed 'consumption' extension."
-  else
-    echo "Failed to install 'consumption' extension. Budgets cannot be created automatically."
-    echo "You can install it with: az extension add --name consumption"
-    echo "Or create budgets manually using 'az consumption budget create'."
-    exit 1
-  fi
+# Ensure start date is normalized to the first day of the month
+start_first=$(date -d "$START_DATE" +%Y-%m-01)
+
+# Ensure end date is not before start_first
+s_ts=$(date -d "$start_first" +%s)
+e_ts=$(date -d "$END_DATE" +%s)
+if (( e_ts < s_ts )); then
+  echo "Error: End date $END_DATE is before the budget start ($start_first)."
+  exit 1
 fi
 
-# Create budgets (Monthly) for each resource group
-# Track budget names per resource group so they can be persisted to .env
-declare -A BUDGET_NAMES_BY_RG=()
-for rg in "${!BUDGETS[@]}"; do
-  amt="${BUDGETS[$rg]}"
-  # sanitize name: replace non-alphanum with '-'
-  safe_rg_name=$(echo "$rg" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
-  # compute budget name from pattern
-  budget_name=${BUDGET_NAME_PATTERN//\{rg\}/$safe_rg_name}
-  # record the intended budget name (even if creation later fails)
-  BUDGET_NAMES_BY_RG["$rg"]="$budget_name"
+echo
+echo "Creating budget '$safe_budget_name' for subscription '$SUBSCRIPTION_NAME' ($SUBSCRIPTION_ID) with amount ${amt} USD (Monthly), category=${CATEGORY}, start=${start_first}, end=${END_DATE}..."
 
-  # Ensure start date is the first day of the month (Azure requirement)
-  start_first=$(date -d "$START_DATE" +%Y-%m-01)
-  # Ensure end date is not before start_first
-  s_ts=$(date -d "$start_first" +%s)
-  e_ts=$(date -d "$END_DATE" +%s)
-  if (( e_ts < s_ts )); then
-    echo "End date $END_DATE is before the budget start (adjusted to first of month: $start_first). Skipping $rg."
-    continue
-  fi
-
-  echo
-  echo "Creating budget '$budget_name' for resource group '$rg' with amount ${amt} USD (Monthly), category=${CATEGORY}, start=${start_first}, end=${END_DATE}..."
-
-  if az consumption budget create-with-rg \
-      --budget-name "$budget_name" \
-      --category "$CATEGORY" \
-      --amount "$amt" \
-      --time-grain "Monthly" \
-      --time-period startDate=${start_first} endDate=${END_DATE} \
-      --resource-group "$rg" >/dev/null 2>&1; then
-    echo "Budget created: $budget_name"
-  else
-    echo "Failed to create budget for '$rg'. Showing example command to run manually:"
-    echo "az consumption budget create-with-rg --budget-name \"$budget_name\" --category \"$CATEGORY\" --amount $amt --time-grain \"Monthly\" --time-period startDate=${start_first} endDate=${END_DATE} --resource-group \"$rg\""
-  fi
-done
+# Use Azure REST API directly to avoid CLI extension schema bugs
+if az rest --method put \
+    --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Consumption/budgets/${safe_budget_name}?api-version=2021-10-01" \
+    --body "{
+      \"properties\": {
+        \"category\": \"${CATEGORY}\",
+        \"amount\": ${amt},
+        \"timeGrain\": \"Monthly\",
+        \"timePeriod\": {
+          \"startDate\": \"${start_first}T00:00:00Z\",
+          \"endDate\": \"${END_DATE}T00:00:00Z\"
+        }
+      }
+    }" >/dev/null 2>&1; then
+  echo "Budget created: $safe_budget_name"
+else
+  echo "Failed to create budget for subscription '$SUBSCRIPTION_NAME'. Showing example REST command to run manually:"
+  echo "az rest --method put --url \"https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.Consumption/budgets/${safe_budget_name}?api-version=2021-10-01\" --body \"{\\\"properties\\\":{\\\"category\\\":\\\"${CATEGORY}\\\",\\\"amount\\\":${amt},\\\"timeGrain\\\":\\\"Monthly\\\",\\\"timePeriod\\\":{\\\"startDate\\\":\\\"${start_first}T00:00:00Z\\\",\\\"endDate\\\":\\\"${END_DATE}T00:00:00Z\\\"}}}\""
+fi
 
 echo
-# Save selected resource groups to a .env file (comma-separated)
+# Save subscription budget metadata to .env file
 ENV_FILE=".env"
-# Preserve the user's selection order when building the list
-selected_rgs=()
-for sel in "${SELECTED[@]}"; do
-  selected_rgs+=("${RG_NAMES[$((sel-1))]}")
-done
-# Join with commas
-IFS=','; joined="${selected_rgs[*]}"; unset IFS
-# Build budget names list in the same order as selected_rgs
-budget_names_ordered=()
-for rg in "${selected_rgs[@]}"; do
-  name="${BUDGET_NAMES_BY_RG[$rg]:-}"
-  budget_names_ordered+=("$name")
-done
-IFS=','; joined_budgets="${budget_names_ordered[*]}"; unset IFS
-
-# Write to .env (overwrite if exists)
 printf "# Generated by budget.sh on %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ENV_FILE"
-printf "RESOURCE_GROUPS=%s\n" "$joined" >> "$ENV_FILE"
-printf "BUDGET_NAMES=%s\n" "$joined_budgets" >> "$ENV_FILE"
+printf "SUBSCRIPTION_ID=%s\n" "$SUBSCRIPTION_ID" >> "$ENV_FILE"
+printf "BUDGET_NAME=%s\n" "$safe_budget_name" >> "$ENV_FILE"
+printf "BUDGET_AMOUNT=%s\n" "$amt" >> "$ENV_FILE"
 
-echo "Saved selected resource groups and budget names to $ENV_FILE"
-
+echo "Saved subscription budget metadata to $ENV_FILE"
 echo "All done."
-
 exit 0

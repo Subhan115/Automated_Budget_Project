@@ -1,48 +1,83 @@
 #!/usr/bin/env bash
-
 # action_group.sh - create an Azure Monitor action group and print its resource id
-
 set -euo pipefail
-
-# Check Azure CLI
-if ! command -v az >/dev/null 2>&1; then
-  echo "Error: Azure CLI ('az') is not installed or not in PATH."
-  echo "Install it from https://aka.ms/InstallAzureCli and try again."
-  exit 1
-fi
 
 ENV_FILE=".env"
 if [ ! -f "$ENV_FILE" ]; then
-  echo "Error: $ENV_FILE not found. Please run budget.sh to generate it with RESOURCE_GROUPS."
+  echo "Error: $ENV_FILE not found. Please run budget.sh first to generate it."
   exit 1
 fi
 
-# Read RESOURCE_GROUPS from .env (expects comma-separated list)
-if ! grep -q '^RESOURCE_GROUPS=' "$ENV_FILE"; then
-  echo "Error: RESOURCE_GROUPS not set in $ENV_FILE"
+# Read SUBSCRIPTION_ID from .env
+if ! grep -q '^SUBSCRIPTION_ID=' "$ENV_FILE"; then
+  echo "Error: SUBSCRIPTION_ID not set in $ENV_FILE"
   exit 1
 fi
-rg_line=$(grep '^RESOURCE_GROUPS=' "$ENV_FILE" | tail -n1)
-rgs=${rg_line#RESOURCE_GROUPS=}
-# strip surrounding quotes if any
-rgs=${rgs#\"}
-rgs=${rgs%\"}
 
-# pick the first non-empty resource group from the comma-separated list
-IFS=',' read -ra RG_ARRAY <<< "$rgs"
-RG_SELECTED=""
-for item in "${RG_ARRAY[@]}"; do
-  item_trim=$(echo "$item" | xargs)
-  if [ -n "$item_trim" ]; then
-    RG_SELECTED="$item_trim"
-    break
-  fi
-done
+sub_line=$(grep '^SUBSCRIPTION_ID=' "$ENV_FILE" | tail -n1)
+SUBSCRIPTION_ID=${sub_line#SUBSCRIPTION_ID=}
+SUBSCRIPTION_ID=${SUBSCRIPTION_ID#\"}
+SUBSCRIPTION_ID=${SUBSCRIPTION_ID%\"}
+
+# Read existing BUDGET_NAME if present
+BUDGET_NAME=""
+if grep -q '^BUDGET_NAME=' "$ENV_FILE"; then
+  bn_line=$(grep '^BUDGET_NAME=' "$ENV_FILE" | tail -n1)
+  BUDGET_NAME=${bn_line#BUDGET_NAME=}
+  BUDGET_NAME=${BUDGET_NAME#\"}
+  BUDGET_NAME=${BUDGET_NAME%\"}
+fi
+
+# Read existing BUDGET_AMOUNT if present
+BUDGET_AMOUNT=""
+if grep -q '^BUDGET_AMOUNT=' "$ENV_FILE"; then
+  ba_line=$(grep '^BUDGET_AMOUNT=' "$ENV_FILE" | tail -n1)
+  BUDGET_AMOUNT=${ba_line#BUDGET_AMOUNT=}
+  BUDGET_AMOUNT=${BUDGET_AMOUNT#\"}
+  BUDGET_AMOUNT=${BUDGET_AMOUNT%\"}
+fi
+
+# Fetch and list available resource groups in the subscription
+echo
+echo "Fetching resource groups in your active subscription..."
+mapfile -t RG_NAMES < <(az group list --query "[].name" -o tsv 2>/dev/null)
+
+if [ ${#RG_NAMES[@]} -eq 0 ]; then
+  echo "No existing resource groups found in this subscription."
+  read -p "Enter a name to create/use for the new Resource Group: " RG_SELECTED
+  RG_SELECTED=$(echo "$RG_SELECTED" | xargs)
+else
+  echo "Available Resource Groups:"
+  echo "---------------------------"
+  for i in "${!RG_NAMES[@]}"; do
+    idx=$((i+1))
+    printf "%3d) %s\n" "$idx" "${RG_NAMES[$i]}"
+  done
+  echo
+
+  while true; do
+    read -p "Select a Resource Group by number (1-${#RG_NAMES[@]}) or enter name manually: " rg_input
+    rg_input=$(echo "$rg_input" | xargs)
+
+    if [[ "$rg_input" =~ ^[0-9]+$ ]] && (( rg_input >= 1 && rg_input <= ${#RG_NAMES[@]} )); then
+      RG_SELECTED="${RG_NAMES[$((rg_input-1))]}"
+      break
+    elif [ -n "$rg_input" ]; then
+      RG_SELECTED="$rg_input"
+      break
+    else
+      echo "Invalid selection. Please try again."
+    fi
+  done
+fi
 
 if [ -z "$RG_SELECTED" ]; then
-  echo "Error: No resource group found in RESOURCE_GROUPS in $ENV_FILE"
+  echo "Error: Resource Group name is required to create an Action Group."
   exit 1
 fi
+
+echo "Selected Resource Group: $RG_SELECTED"
+echo
 
 # Prompt for action group name
 read -p "Enter action group name to create: " AG_NAME
@@ -52,117 +87,29 @@ if [ -z "$AG_NAME" ]; then
   exit 1
 fi
 
-# Prompt for email receivers (comma-separated). User chose multiple allowed.
-read -p "Enter email addresses to add as email receivers (comma-separated), or leave blank to skip: " EMAIL_INPUT
-EMAIL_INPUT=$(echo "$EMAIL_INPUT" | xargs)
-EMAILS=()
-if [ -n "$EMAIL_INPUT" ]; then
-  IFS=',' read -ra raw_emails <<< "$EMAIL_INPUT"
-  for e in "${raw_emails[@]}"; do
-    e_trim=$(echo "$e" | xargs)
-    if [ -n "$e_trim" ]; then
-      EMAILS+=("$e_trim")
-    fi
-  done
-fi
-
 echo "Creating action group '$AG_NAME' in resource group '$RG_SELECTED'..."
 
-# Build action args for az (multiple --action email NAME EMAIL_ADDRESS)
-action_args=()
-if [ ${#EMAILS[@]} -gt 0 ]; then
-  idx=1
-  for em in "${EMAILS[@]}"; do
-    # create a simple receiver name (email-1, email-2, ...)
-    recv_name="email-${idx}"
-    action_args+=(--action email "$recv_name" "$em")
-    idx=$((idx+1))
-  done
-fi
-
 # Create the action group and return its full resource id
-# Using --query id -o tsv to fetch the resource id only
-if AG_ID=$(az monitor action-group create --name "$AG_NAME" --resource-group "$RG_SELECTED" "${action_args[@]}" --query id -o tsv 2>/dev/null); then
+if AG_ID=$(az monitor action-group create --name "$AG_NAME" --resource-group "$RG_SELECTED" --query id -o tsv 2>/dev/null); then
   echo "Action group created successfully."
   echo "Resource ID: $AG_ID"
-  if [ ${#EMAILS[@]} -gt 0 ]; then
-    echo "Added email receivers: ${EMAILS[*]}"
+
+  # Persist parameters and action group id into .env file
+  printf "# Generated by action_group.sh on %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ENV_FILE"
+  printf "SUBSCRIPTION_ID=%s\n" "$SUBSCRIPTION_ID" >> "$ENV_FILE"
+  if [ -n "$BUDGET_NAME" ]; then
+    printf "BUDGET_NAME=%s\n" "$BUDGET_NAME" >> "$ENV_FILE"
   fi
-
-  # Persist this action group id into the .env file next to RESOURCE_GROUPS/BUDGET_NAMES
-  if [ -f "$ENV_FILE" ]; then
-    # read existing RESOURCE_GROUPS
-    rg_line=$(grep '^RESOURCE_GROUPS=' "$ENV_FILE" | tail -n1)
-    rgs=${rg_line#RESOURCE_GROUPS=}
-    rgs=${rgs#\"}
-    rgs=${rgs%\"}
-    IFS=',' read -ra RG_FILE_ARRAY <<< "$rgs"
-
-    # read existing BUDGET_NAMES (if present)
-    bn_line=$(grep '^BUDGET_NAMES=' "$ENV_FILE" | tail -n1 2>/dev/null || true)
-    if [ -n "$bn_line" ]; then
-      bn=${bn_line#BUDGET_NAMES=}
-      bn=${bn#\"}
-      bn=${bn%\"}
-      IFS=',' read -ra BN_FILE_ARRAY <<< "$bn"
-    else
-      # create blank budget names array matching resource groups
-      BN_FILE_ARRAY=()
-      for _ in "${RG_FILE_ARRAY[@]}"; do BN_FILE_ARRAY+=(""); done
-    fi
-
-    # read existing ACTION_GROUP_IDS if present
-    ag_line=$(grep '^ACTION_GROUP_IDS=' "$ENV_FILE" | tail -n1 2>/dev/null || true)
-    if [ -n "$ag_line" ]; then
-      ags_existing=${ag_line#ACTION_GROUP_IDS=}
-      ags_existing=${ags_existing#\"}
-      ags_existing=${ags_existing%\"}
-      IFS=',' read -ra AG_EXIST_ARRAY <<< "$ags_existing"
-    else
-      AG_EXIST_ARRAY=()
-      for _ in "${RG_FILE_ARRAY[@]}"; do AG_EXIST_ARRAY+=(""); done
-    fi
-
-    # ensure AG_IDS array same length
-    AG_IDS=("")
-    for i in "${!RG_FILE_ARRAY[@]}"; do
-      AG_IDS[i]="${AG_EXIST_ARRAY[i]:-}"
-    done
-
-    # set the AG_ID for the selected resource group (match trimmed)
-    matched=0
-    for i in "${!RG_FILE_ARRAY[@]}"; do
-      if [ "$(echo "${RG_FILE_ARRAY[$i]}" | xargs)" = "$RG_SELECTED" ]; then
-        AG_IDS[$i]="$AG_ID"
-        matched=1
-        break
-      fi
-    done
-
-    if [ "$matched" -eq 0 ]; then
-      # append if not found
-      RG_FILE_ARRAY+=("$RG_SELECTED")
-      BN_FILE_ARRAY+=("")
-      AG_IDS+=("$AG_ID")
-    fi
-
-    # join back to comma-separated strings
-    IFS=','; joined_rg="${RG_FILE_ARRAY[*]}"; joined_budgets="${BN_FILE_ARRAY[*]}"; joined_agids="${AG_IDS[*]}"; unset IFS
-
-    # Overwrite .env with updated values
-    printf "# Generated by action_group.sh on %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ENV_FILE"
-    printf "RESOURCE_GROUPS=%s\n" "$joined_rg" >> "$ENV_FILE"
-    printf "BUDGET_NAMES=%s\n" "$joined_budgets" >> "$ENV_FILE"
-    printf "ACTION_GROUP_IDS=%s\n" "$joined_agids" >> "$ENV_FILE"
-
-    echo "Saved action group id for '$RG_SELECTED' to $ENV_FILE"
-  else
-    echo "Warning: $ENV_FILE not found; not persisting action group id."
+  if [ -n "$BUDGET_AMOUNT" ]; then
+    printf "BUDGET_AMOUNT=%s\n" "$BUDGET_AMOUNT" >> "$ENV_FILE"
   fi
+  printf "ACTION_GROUP_ID=%s\n" "$AG_ID" >> "$ENV_FILE"
+  printf "ACTION_GROUP_RG=%s\n" "$RG_SELECTED" >> "$ENV_FILE"
 
+  echo "Saved subscription action group metadata to $ENV_FILE"
   exit 0
 else
   echo "Failed to create action group. Attempting to run command without suppressing output to show error:"
-  az monitor action-group create --name "$AG_NAME" --resource-group "$RG_SELECTED" "${action_args[@]}"
+  az monitor action-group create --name "$AG_NAME" --resource-group "$RG_SELECTED"
   exit 1
 fi
