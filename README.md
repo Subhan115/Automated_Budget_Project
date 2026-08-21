@@ -80,7 +80,7 @@ The script will guide you through the following steps:
 
 ## 🏗️ Architecture
 
-![Project Architecture](Architecture.svg)
+![Project Architecture](architecture.svg)
 
 ## The Automation Workflow Explained
 
