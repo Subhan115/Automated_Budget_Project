@@ -78,6 +78,10 @@ The script will guide you through the following steps:
 -   Linking the Action Group to the Logic App's webhook.
 -   Assigning the necessary RBAC permissions for the Logic App to read cost data.
 
+## 🏗️ Architecture
+
+![Project Architecture](Architecture.svg)
+
 ## The Automation Workflow Explained
 
 The `main.py` script orchestrates the following shell scripts to build the system:
