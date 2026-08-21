@@ -1,5 +1,4 @@
 # 💰 Automated Azure Budget Guardrail System
-[![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/Subhan115/Automated_Budget_Project/tree/main)
 
 This project provides an automated cost-monitoring and notification system for Azure. When a budget threshold is exceeded, it automatically identifies the highest-cost resource and sends a detailed email notification, including a direct link to manage the resource in the Azure Portal.
 
@@ -51,7 +50,6 @@ When the budget threshold is met, the Azure Monitor Action Group invokes the Log
 Before you begin, ensure you have the following installed and configured:
 
 -   An active **Azure subscription**.
--   **Azure CLI**: You must be logged in (`az login`).
 -   **Python 3**: Used to run the main deployment orchestrator.
 -   Permissions to create resources (Budgets, Action Groups, Logic Apps) and assign RBAC roles (Cost Management Reader) at the subscription scope.
 
