@@ -11,10 +11,11 @@ fi
 # Load variables from .env
 export $(grep -v '^#' "$ENV_FILE" | xargs)
 
-# Step 0: Read Logic App Resource Group from .env
-LOGIC_APP_RG="${LOGIC_APP_RG:-${LOGIC_APP_RESOURCE_GROUP:-Guardrail-RG}}"
+# Step 0: Read Logic App Resource Group strictly from LOGIC_APP_RG or LOGIC_APP_RESOURCE_GROUP
+LOGIC_APP_RG="${LOGIC_APP_RG:-${LOGIC_APP_RESOURCE_GROUP:-}}"
+
 if [ -z "$LOGIC_APP_RG" ]; then
-    echo "Error: LOGIC_APP_RG is not set in $ENV_FILE" >&2
+    echo "Error: Neither LOGIC_APP_RG nor LOGIC_APP_RESOURCE_GROUP is set in $ENV_FILE" >&2
     exit 1
 fi
 
@@ -27,8 +28,8 @@ echo "Logic App Resource Group : $LOGIC_APP_RG"
 LOGIC_APP_NAME=$(az rest --method get \
   --uri "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${LOGIC_APP_RG}/providers/Microsoft.Logic/workflows?api-version=2019-05-01" \
   --query "value[0].name" -o tsv 2>/dev/null || true)
-
 LOGIC_APP_NAME="${LOGIC_APP_NAME:-BudgetSystem}"
+
 echo "Target Logic App         : $LOGIC_APP_NAME"
 
 # Step 1: Enable System-Assigned Identity on the Logic App
@@ -62,7 +63,6 @@ until az role assignment create \
     --assignee-principal-type "ServicePrincipal" \
     --role "$ROLE_NAME" \
     --scope "$SCOPE" 2>/dev/null; do
-    
     counter=$((counter+1))
     if [ $counter -ge $max_retries ]; then
         echo "Error: Failed to assign role after $max_retries attempts. Please try running the assignment manually." >&2

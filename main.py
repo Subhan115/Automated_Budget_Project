@@ -8,7 +8,7 @@ SCRIPTS = [
     "budget.sh",
     "action_group.sh",
     "notification.sh",
-    "deploy.sh",
+    "deploy_LogicApp.sh",
     "Logic_App_URL.sh",
     "RBAC.sh",
 ]
