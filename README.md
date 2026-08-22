@@ -115,6 +115,22 @@ The `main.py` script orchestrates the following shell scripts to build the syste
     -   Retrieves the Principal ID of the Managed Identity.
     -   Assigns the **"Cost Management Reader"** role to this identity at the subscription scope, granting it the necessary permissions to query cost data securely.
 
+## 📧 Logic App Email Account Setup
+
+After running the project and deploying the architecture to your Azure environment, you need to connect an account to the Logic App's email connector.
+
+1. Go to [**Azure Portal**](https://portal.azure.com) and sign in if you haven't already.
+2. Open the **Resource Group** where the Logic App is deployed.
+3. Open the **Logic App**.
+4. Find the **Send an email (V2)** action in the workflow.
+5. Click on **Send an email (V2)**.
+6. A configuration menu will appear on the **right-hand side**.
+7. Scroll to the bottom of the menu and click the **`+ Add an account`** button.
+8. Sign in or create an outlook account that you want the Logic App to use for sending emails.
+9. Once the account is connected, the **Send an email (V2)** action will be ready to send email notifications.
+
+> **⚠️ Important:** This account connection is required for the email notification functionality to work correctly after deployment.
+
 ## Security
 
 Security is a primary consideration in this project's design.
